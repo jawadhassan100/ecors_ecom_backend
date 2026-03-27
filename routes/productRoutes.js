@@ -7,31 +7,36 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from 'url';
 import mongoose from "mongoose";
+import * as Bytescale from "@bytescale/sdk";
+import nodeFetch from "node-fetch";
 
 const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Create uploads directory if it doesn't exist
-const uploadDir = path.join(__dirname, '../uploads/products');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-  console.log('Created uploads directory:', uploadDir);
+// Initialize Bytescale UploadManager
+const uploadManager = new Bytescale.UploadManager({
+  fetchApi: nodeFetch,
+  apiKey: process.env.BYTESCALE_API_KEY // Add your API key to .env
+});
+
+// Create temp directory for multer
+const tempDir = path.join(__dirname, '../temp');
+if (!fs.existsSync(tempDir)) {
+  fs.mkdirSync(tempDir, { recursive: true });
 }
 
-// Configure multer for local storage
+// Configure multer for temporary storage
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, uploadDir);
+    cb(null, tempDir);
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname);
-    cb(null, uniqueSuffix + ext);
+    cb(null, uniqueSuffix + path.extname(file.originalname));
   }
 });
 
-// File filter to only allow images
 const fileFilter = (req, file, cb) => {
   const allowedTypes = /jpeg|jpg|png|webp|gif/;
   const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
@@ -51,28 +56,14 @@ const upload = multer({
 });
 
 // Helper function to generate unique ID
-const generateUniqueId = async () => {
-  const timestamp = Date.now();
-  const random = Math.floor(Math.random() * 10000);
-  const newId = `prod_${timestamp}_${random}`;
-  
-  // Check if ID already exists
-  const existing = await Product.findOne({ id: newId });
-  if (existing) {
-    return generateUniqueId(); // Recursively generate new one if exists
-  }
-  return newId;
-};
-
 const generateCustomId = async () => {
   const timestamp = Date.now();
   const random = Math.floor(Math.random() * 10000);
   const newId = `prod_${timestamp}_${random}`;
   
-  // Check if ID already exists
   const existing = await Product.findOne({ id: newId });
   if (existing) {
-    return generateCustomId(); // Recursively generate new one if exists
+    return generateCustomId();
   }
   return newId;
 };
@@ -90,29 +81,41 @@ const formatProduct = (product) => ({
   stock_quantity: product.stock_quantity || 10
 });
 
-// ✅ ADD PRODUCT WITH IMAGE - FIXED to generate custom ID
+// ✅ ADD PRODUCT with Bytescale
 router.post("/add", checkAdmin, upload.single('image'), async (req, res) => {
+  let tempFilePath = null;
+  
   try {
-    console.log("Request body:", req.body);
-    console.log("Uploaded file:", req.file);
-    
     const { title, price, description, categories } = req.body;
     
     if (!title || !price) {
       return res.status(400).json({ error: "Title and price are required" });
     }
     
-    // Generate unique custom ID for the new product
     const customId = await generateCustomId();
     console.log("Generated custom ID:", customId);
     
     let imageUrl = '';
+    
     if (req.file) {
-      imageUrl = `/uploads/products/${req.file.filename}`;
+      tempFilePath = req.file.path;
+      
+      // Read file buffer
+      const fileBuffer = fs.readFileSync(tempFilePath);
+      
+      // Upload to Bytescale
+      const uploadResult = await uploadManager.upload({
+        data: fileBuffer,
+        mime: req.file.mimetype,
+        originalFileName: req.file.originalname,
+      });
+      
+      imageUrl = uploadResult.fileUrl;
+      console.log("Uploaded to Bytescale:", imageUrl);
     }
     
     const product = new Product({
-      id: customId, // Store the custom ID
+      id: customId,
       title,
       price: String(price),
       description: description || '',
@@ -125,15 +128,21 @@ router.post("/add", checkAdmin, upload.single('image'), async (req, res) => {
     
     const savedProduct = await product.save();
     console.log("Product saved with custom ID:", savedProduct.id);
-    console.log("Product MongoDB _id:", savedProduct._id);
     
     res.json({ 
       success: true, 
       product: formatProduct(savedProduct)
     });
+    
   } catch (err) {
     console.error("Error adding product:", err);
     res.status(500).json({ error: err.message });
+  } finally {
+    // Clean up temp file
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+      fs.unlinkSync(tempFilePath);
+      console.log("Deleted temp file:", tempFilePath);
+    }
   }
 });
 
@@ -143,7 +152,7 @@ router.get("/", async (req, res) => {
     const products = await Product.find().sort({ date_created: -1 });
     
     const formatted = products.map((p) => ({
-      id: p.id || p._id, // Use custom id if exists, fallback to _id
+      id: p.id || p._id,
       title: p.title,
       price: Number(p.price),
       description: p.description,
@@ -161,21 +170,16 @@ router.get("/", async (req, res) => {
   }
 });
 
-// ✅ GET SINGLE PRODUCT - Find by custom ID
+// ✅ GET SINGLE PRODUCT
 router.get("/:id", async (req, res) => {
   try {
     const productId = req.params.id;
     console.log("Fetching product with ID:", productId);
     
-    // Try to find by custom id field first
     let product = await Product.findOne({ id: productId });
-    
-    // If not found by custom id, try by MongoDB _id (for old products)
     if (!product && mongoose.Types.ObjectId.isValid(productId)) {
       product = await Product.findById(productId);
     }
-    
-    // If still not found, try by string _id
     if (!product) {
       product = await Product.findOne({ _id: productId });
     }
@@ -261,10 +265,11 @@ router.get("/category/:categoryName", async (req, res) => {
 
 // ✅ UPDATE PRODUCT
 router.put("/:id", checkAdmin, upload.single('image'), async (req, res) => {
+  let tempFilePath = null;
+  
   try {
     const productId = req.params.id;
     
-    // Find product by custom id or _id
     let product = await Product.findOne({ id: productId });
     if (!product && mongoose.Types.ObjectId.isValid(productId)) {
       product = await Product.findById(productId);
@@ -277,13 +282,18 @@ router.put("/:id", checkAdmin, upload.single('image'), async (req, res) => {
     const updateData = { ...req.body, date_modified: new Date().toISOString() };
     
     if (req.file) {
-      if (product.main_image_url && !product.main_image_url.startsWith('http')) {
-        const oldImagePath = path.join(__dirname, '..', product.main_image_url);
-        if (fs.existsSync(oldImagePath)) {
-          fs.unlinkSync(oldImagePath);
-        }
-      }
-      updateData.main_image_url = `/uploads/products/${req.file.filename}`;
+      tempFilePath = req.file.path;
+      
+      // Upload new image to Bytescale
+      const fileBuffer = fs.readFileSync(tempFilePath);
+      const uploadResult = await uploadManager.upload({
+        data: fileBuffer,
+        mime: req.file.mimetype,
+        originalFileName: req.file.originalname,
+      });
+      
+      updateData.main_image_url = uploadResult.fileUrl;
+      console.log("Uploaded new image to Bytescale:", updateData.main_image_url);
     }
     
     if (updateData.price) updateData.price = String(updateData.price);
@@ -305,13 +315,18 @@ router.put("/:id", checkAdmin, upload.single('image'), async (req, res) => {
         image: updated.main_image_url,
       }
     });
+    
   } catch (err) {
     console.error("Error updating product:", err);
     res.status(500).json({ error: err.message });
+  } finally {
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+      fs.unlinkSync(tempFilePath);
+    }
   }
 });
 
-// ✅ DELETE PRODUCT
+// ✅ DELETE PRODUCT with Bytescale file deletion
 router.delete("/:id", checkAdmin, async (req, res) => {
   try {
     const productId = req.params.id;
@@ -326,20 +341,38 @@ router.delete("/:id", checkAdmin, async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
     
-    // Delete image file if exists and is local
-    if (product.main_image_url && !product.main_image_url.startsWith('http')) {
-      const imagePath = path.join(__dirname, '..', product.main_image_url);
-      if (fs.existsSync(imagePath)) {
-        fs.unlinkSync(imagePath);
-        console.log('Deleted image:', imagePath);
+    // Delete file from Bytescale if it's a Bytescale URL
+    if (product.main_image_url && product.main_image_url.includes('bytescale.com')) {
+      try {
+        const bytescaleInfo = extractBytescaleInfo(product.main_image_url);
+        
+        if (bytescaleInfo) {
+          // Use Bytescale's deleteFile method
+          await uploadManager.deleteFile({
+            accountId: bytescaleInfo.accountId,
+            filePath: bytescaleInfo.filePath
+          });
+          console.log('✅ Deleted from Bytescale:', bytescaleInfo.filePath);
+        }
+      } catch (uploadErr) {
+        console.error('Error deleting from Bytescale:', uploadErr);
+        // Continue with database deletion even if Bytescale deletion fails
       }
     }
     
+    // Delete from database
     await Product.findByIdAndDelete(product._id);
-    res.json({ message: "Deleted successfully" });
+    res.json({ 
+      success: true,
+      message: "Product deleted successfully" 
+    });
+    
   } catch (err) {
     console.error("Error deleting product:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
   }
 });
 

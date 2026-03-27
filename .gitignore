@@ -1,6 +1,8 @@
 # Environment variables
 .env
 
+temp/
+uploads/
 
 # Dependencies
 node_modules/
