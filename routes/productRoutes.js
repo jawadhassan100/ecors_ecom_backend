@@ -7,14 +7,14 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from 'url';
 import mongoose from "mongoose";
+import FormData from 'form-data';
+import * as Bytescale from "@bytescale/sdk";
+import nodeFetch from "node-fetch";
 
 const router = express.Router();
 
-
-
-// Configure multer for temporary storage
-const storage = multer.memoryStorage(); // keep files in memory
-
+// Configure multer for memory storage
+const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
   const allowedTypes = /jpeg|jpg|png|webp|gif/;
@@ -29,10 +29,32 @@ const fileFilter = (req, file, cb) => {
 };
 
 const upload = multer({
-  storage,
+  storage: storage,
   limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: fileFilter // your existing filter
+  fileFilter: fileFilter
 });
+
+// Helper: Upload to Upload.io
+
+
+const uploadManager = new Bytescale.UploadManager({
+  fetchApi: nodeFetch, // required in Node.js
+  apiKey: process.env.BYTESCALE_API_KEY // your secret API key
+});
+
+const uploadToUploadIO = async (fileBuffer, fileName, mimeType) => {
+  const result = await uploadManager.upload({
+    data: fileBuffer,
+    originalFileName: fileName,
+    mime: mimeType,
+    size: fileBuffer.length, // ✅ required!
+    path: `/${fileName}`
+  });
+
+  // result.filePath is preferred
+  console.log("Bytescale upload result:", result);
+  return result.fileUrl; // or use result.filePath with UrlBuilder
+};
 
 // Helper function to generate unique ID
 const generateCustomId = async () => {
@@ -54,16 +76,14 @@ const formatProduct = (product) => ({
   price: Number(product.price),
   description: product.description,
   category: product.categories,
-  image: product.main_image_url,
+  image: product.main_image_url, // This will be the Upload.io CDN URL
   createdAt: product.date_created,
   rating: product.rating || { rate: 0, count: 0 },
   stock_quantity: product.stock_quantity || 10
 });
 
-// ✅ ADD PRODUCT - Keep local storage for now
+// ✅ ADD PRODUCT with Upload.io CDN
 router.post("/add", checkAdmin, upload.single('image'), async (req, res) => {
-  let tempFilePath = null;
-  
   try {
     const { title, price, description, categories } = req.body;
     
@@ -75,10 +95,15 @@ router.post("/add", checkAdmin, upload.single('image'), async (req, res) => {
     console.log("Generated custom ID:", customId);
     
     let imageUrl = '';
+    
+    // Upload to Upload.io CDN
     if (req.file) {
-      tempFilePath = req.file.path;
-      // Use local storage for now
-      imageUrl = `/temp/${req.file.filename}`;
+      imageUrl = await uploadToUploadIO(
+        req.file.buffer, 
+        req.file.originalname, 
+        req.file.mimetype
+      );
+      console.log("Uploaded to Upload.io CDN:", imageUrl);
     }
     
     const product = new Product({
@@ -87,7 +112,7 @@ router.post("/add", checkAdmin, upload.single('image'), async (req, res) => {
       price: String(price),
       description: description || '',
       categories: categories || 'Uncategorized',
-      main_image_url: imageUrl,
+      main_image_url: imageUrl, // Store CDN URL
       date_created: new Date().toISOString(),
       date_modified: new Date().toISOString(),
       status: 'publish'
@@ -104,11 +129,6 @@ router.post("/add", checkAdmin, upload.single('image'), async (req, res) => {
   } catch (err) {
     console.error("Error adding product:", err);
     res.status(500).json({ error: err.message });
-  } finally {
-    if (tempFilePath && fs.existsSync(tempFilePath)) {
-      // Don't delete for now, we need to serve it
-      // fs.unlinkSync(tempFilePath);
-    }
   }
 });
 
@@ -123,7 +143,7 @@ router.get("/", async (req, res) => {
       price: Number(p.price),
       description: p.description,
       category: p.categories,
-      image: p.main_image_url,
+      image: p.main_image_url, // CDN URL from Upload.io
       createdAt: p.date_created,
       rating: p.rating || { rate: 0, count: 0 },
     }));
@@ -166,7 +186,7 @@ router.get("/:id", async (req, res) => {
       price: Number(product.price),
       description: product.description,
       category: product.categories,
-      image: product.main_image_url,
+      image: product.main_image_url, // CDN URL from Upload.io
       createdAt: product.date_created,
       rating: product.rating || { rate: 0, count: 0 },
     });
@@ -218,7 +238,7 @@ router.get("/category/:categoryName", async (req, res) => {
       price: Number(p.price),
       description: p.description,
       category: p.categories,
-      image: p.main_image_url,
+      image: p.main_image_url, // CDN URL from Upload.io
       rating: p.rating || { rate: 0, count: 0 },
     }));
     
@@ -246,7 +266,13 @@ router.put("/:id", checkAdmin, upload.single('image'), async (req, res) => {
     const updateData = { ...req.body, date_modified: new Date().toISOString() };
     
     if (req.file) {
-      updateData.main_image_url = `/temp/${req.file.filename}`;
+      // Upload new image to Upload.io CDN
+      updateData.main_image_url = await uploadToUploadIO(
+        req.file.buffer, 
+        req.file.originalname, 
+        req.file.mimetype
+      );
+      console.log("Updated image on Upload.io CDN:", updateData.main_image_url);
     }
     
     if (updateData.price) updateData.price = String(updateData.price);
@@ -287,6 +313,10 @@ router.delete("/:id", checkAdmin, async (req, res) => {
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
+    
+    // Note: Upload.io doesn't automatically delete files
+    // You can optionally delete from Upload.io if needed
+    // But for now, we just delete from database
     
     await Product.findByIdAndDelete(product._id);
     res.json({ message: "Deleted successfully" });
