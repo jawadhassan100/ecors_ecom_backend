@@ -21,12 +21,6 @@ connectDB();
 app.use("/api/products", productRoutes);
 app.use("/api/admin", adminRoutes);
 
-app.get("/test-image", (req, res) => {
-  res.json({ 
-    uploadsPath: path.join(__dirname, 'uploads'),
-    staticPath: '/uploads'
-  });
-});
 
 app.get("/", (req, res) => {
   res.send("API running...");
