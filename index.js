@@ -16,7 +16,11 @@ const __dirname = path.dirname(__filename);
 // Serve static files from uploads directory
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-app.use(cors());
+app.use(  cors({
+      origin: ["https://ecors-ecom-frontend.vercel.app", "http://localhost:5173"],
+      credentials: true 
+    }));
+    
 app.use(express.json());
 
 connectDB();
