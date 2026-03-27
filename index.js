@@ -25,8 +25,7 @@ app.use(cors({
 
 app.use(express.json());
 
-// Serve temp files (for local image storage)
-app.use('/temp', express.static(path.join(__dirname, 'temp')));
+
 
 // Connect to DB
 connectDB();
