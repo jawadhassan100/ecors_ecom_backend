@@ -1,5 +1,4 @@
 # Environment variables
-.env
 
 temp/
 uploads/
@@ -7,3 +6,4 @@ uploads/
 # Dependencies
 node_modules/
 
+config.bat
